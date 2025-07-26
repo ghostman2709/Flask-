@@ -1,0 +1,860 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash
+import time
+import json
+import os
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+import sqlite3
+import logging
+from flask_cors import CORS
+import base64
+from io import BytesIO
+import qrcode
+import random
+import string
+import re
+import requests
+import openai
+import asyncio
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+from serpapi import GoogleSearch
+from flask_apscheduler import APScheduler
+import pytz
+import functools
+
+app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24))
+CORS(app)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+DATABASE_FILE = 'hyperfoco.db'
+OCR_SERVICE_URL = os.getenv('OCR_SERVICE_URL', "http://localhost:3001/perform_ocr")
+
+user_state = {}
+user_cart = {}
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+login_manager.login_message = "Por favor, faça login para acessar esta página."
+login_manager.login_message_category = "info"
+
+TIME_ZONE = 'America/Sao_Paulo'
+scheduler = APScheduler()
+
+class User(UserMixin):
+    def __init__(self, id, username, password_hash, access_level):
+        self.id, self.username, self.password_hash, self.access_level = id, username, password_hash, access_level
+    @staticmethod
+    def get(user_id):
+        conn = get_db_connection()
+        user_data = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        conn.close()
+        return User(user_data['id'], user_data['username'], user_data['password_hash'], user_data['access_level']) if user_data else None
+    @staticmethod
+    def get_by_username(username):
+        conn = get_db_connection()
+        user_data = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        conn.close()
+        return User(user_data['id'], user_data['username'], user_data['password_hash'], user_data['access_level']) if user_data else None
+    def is_admin_full(self): return self.access_level == 'admin_full'
+    def can_access_limited_dashboard(self): return self.access_level in ['admin_painel', 'admin_full']
+
+@login_manager.user_loader
+def load_user(user_id): return User.get(user_id)
+
+def admin_full_required(f):
+    @functools.wraps(f)
+    @login_required
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_admin_full():
+            flash('Acesso negado. Você não tem permissão para acessar esta página.', 'danger')
+            return redirect(url_for('dashboard'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS pedidos (id TEXT PRIMARY KEY, cliente_jid TEXT NOT NULL, produto_nome TEXT, valor_esperado REAL NOT NULL, valor_pago REAL, id_transacao_pix TEXT, primeiros_4_digitos_pix_cliente TEXT, timestamp_pedido REAL NOT NULL, timestamp_pagamento REAL, status TEXT NOT NULL, motoboy_solicitado INTEGER DEFAULT 0, motoboy_status TEXT, historico_eventos TEXT, endereco_entrega TEXT, valor_declarado_cliente REAL, link_completo TEXT, agendamento_entrega TEXT, lembrete_enviado INTEGER DEFAULT 0)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS produtos (codigo TEXT PRIMARY KEY, nome TEXT NOT NULL, valor REAL NOT NULL, pix_code TEXT NOT NULL, tipo_produto TEXT DEFAULT 'FISICO', link_produto TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS configuracoes (chave TEXT PRIMARY KEY, valor TEXT, descricao TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS respostas_personalizadas (id INTEGER PRIMARY KEY AUTOINCREMENT, gatilho TEXT NOT NULL UNIQUE, tipo_resposta TEXT NOT NULL, conteudo_resposta TEXT NOT NULL, descricao TEXT, correspondencia_parcial INTEGER DEFAULT 0)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, access_level TEXT DEFAULT 'admin_full')''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ia_gatilhos (id INTEGER PRIMARY KEY AUTOINCREMENT, gatilho TEXT NOT NULL UNIQUE)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ia_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, nome_prompt TEXT NOT NULL UNIQUE, conteudo_prompt TEXT NOT NULL, is_active INTEGER DEFAULT 0)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ia_aprendizado (id INTEGER PRIMARY KEY AUTOINCREMENT, pergunta_exemplo TEXT NOT NULL, resposta_ideal TEXT NOT NULL)''')
+    columns_pedidos = [col[1] for col in cursor.execute("PRAGMA table_info(pedidos)")]
+    if 'pagador_nome_pix' not in columns_pedidos: cursor.execute("ALTER TABLE pedidos ADD COLUMN pagador_nome_pix TEXT")
+    if 'pagamento_data_pix' not in columns_pedidos: cursor.execute("ALTER TABLE pedidos ADD COLUMN pagamento_data_pix TEXT")
+    
+    configuracoes_padrao = [
+        ('num_motoboy', '555581314771', '1. Número do Motoboy (formato 55DDDNumero)'),
+        ('local_retirada', 'Avenida Tamandaré 1839', '2. Endereço fixo para retirada do produto'),
+        ('msg_boas_vindas', '👋 Olá, {NOME_CLIENTE}! Bem-vindo(a)! 👋\n\n1️⃣ *Ver Produtos*\n2️⃣ *Sair*', '3. Mensagem inicial (menu padrão)'),
+        ('usar_menu_avancado', '1', '3a. Usar Menu Avançado? (1 para Sim, 0 para Não)'),
+        ('msg_boas_vindas_avancado', '👋 Olá, {NOME_CLIENTE}! Bem-vindo(a) ao nosso atendimento automatizado! 👋\n\nSou seu assistente virtual e estou aqui para ajudar. Por favor, escolha uma das opções abaixo para começar:', '3b. Mensagem do Menu Avançado'),
+        ('msg_suporte_ti', '🔧 Para que eu possa te ajudar, por favor, me diga qual é o seu problema?', '3c. Mensagem para opção "Suporte (TI)"'),
+        ('msg_suporte_registrado', '✅ Sua solicitação foi registrada com sucesso. Em breve um de nossos técnicos especializados entrará em contato. Obrigado!', '3d. Mensagem de confirmação após descrever o problema de suporte.'),
+        ('msg_link_hiperboot', '🤖 O HiperBoot é a plataforma que torna tudo isso possível! Conheça mais e adquira o seu no link abaixo:', '3e. Texto para opção "HiperBoot"'),
+        ('link_do_hiperboot', 'https://kiwify.app/Jb5oP4m', '3f. Link do site para opção "HiperBoot"'),
+        ('msg_conversa_normal', 'Ok, pode falar. Em que posso ajudar?', '3g. Mensagem para a opção "Conversa Normal" do menu.'),
+        ('ativar_boas_vindas_e_followup', '1', 'A. Ativar menu automático na 1ª msg e lembrete de inatividade (2h)?'),
+        ('msg_followup_inatividade', '👋 Olá! Percebi que não continuamos nossa conversa. Gostaria de recomeçar? Se precisar de algo, é só escolher uma opção abaixo.', 'B. Mensagem para clientes inativos por 2 horas.'),
+        ('msg_ver_produtos_titulo', '📋 *Nossos Produtos:*', '4. Título da lista de produtos'),
+        ('msg_pedir_codigo_apos_lista', 'Agora, digite o código do produto desejado.\n\nOu digite *0* para voltar ao menu inicial.', '5. Mensagem após mostrar a lista de produtos'),
+        ('msg_detalhes_produto', '🧾 *Detalhes do Produto:*', '6. Título ao mostrar o produto escolhido'),
+        ('msg_menu_pos_selecao', 'O que deseja fazer agora?\n\n1️⃣ *Gerar Código PIX*\n2️⃣ *Escolher Outro Produto*\n3️⃣ *Cancelar Pedido*', '7. Opções após selecionar um produto'),
+        ('msg_resumo_pix', '🧾 *Resumo da sua Compra:*', '8. Título do resumo para pagamento PIX'),
+        ('msg_instrucao_pix', '*Por favor, realize o pagamento via PIX para prosseguir!*', '9. Instrução principal do PIX'),
+        ('msg_caption_qrcode', '📸 Escaneie ou use o código abaixo:', '10. Legenda da imagem do QR Code'),
+        ('msg_pedir_id_transacao', '✅ Após o pagamento, digite os 4 (ou mais) primeiros caracteres do ID da transação.\n\nOu digite *0* para cancelar.', '11. Mensagem pedindo os dígitos do ID'),
+        ('msg_id_registrado', '✅ ID parcial registrado: *{ID_PARCIAL}*. Agora, por favor, envie a *IMAGEM do comprovante*.\n\nOu digite *0* para cancelar.', '12. Confirmação do ID e pedido da imagem'),
+        ('msg_codigo_invalido', '⚠️ *Código inválido.* Digite um código ou *0* para voltar.', 'Erro: Código do produto não existe'),
+        ('msg_opcao_invalida', '⚠️ Opção inválida.', 'Erro: Digitou algo inesperado'),
+        ('msg_id_invalido', '⚠️ ID inválido. Envie pelo menos 4 caracteres.', 'Erro: ID da transação com formato errado'),
+        ('msg_comprovante_invalido', '❌ *Comprovante NÃO confirmado.* O valor ou ID não correspondem. Tente novamente.', 'Erro: OCR falhou (quando menu de edição está desativado)'),
+        ('msg_erro_interno', '❌ Desculpe, ocorreu um erro ao processar seu pedido. Tente novamente.', 'Erro: Falha de comunicação com o servidor'),
+        ('msg_confirmacao_pagamento', '🎉 *Pagamento confirmado!* 🎉', '13. Pagamento validado com sucesso pelo OCR'),
+        ('msg_pedir_endereco', 'Envie seu endereço completo para entrega.\n\nOu digite *0* para cancelar.', '14. Mensagem pedindo o endereço após o pagamento'),
+        ('msg_confirmar_endereco', 'Você confirmou o endereço:\n\n*{ENDERECO_CLIENTE}*\n\nEstá correto?\n\n1️⃣ *Sim, está correto*\n2️⃣ *Não, quero digitar novamente*\n3️⃣ *Cancelar Entrega*', '15. Pedido de confirmação do endereço digitado'),
+        ('msg_endereco_confirmado', '✅ Endereço confirmado! Como deseja prosseguir com a entrega?\n\n1️⃣ *Chamar Motoboy Agora*\n2️⃣ *Agendar Entrega*\n3️⃣ *Cancelar Entrega*', '16. Opções de entrega após confirmar endereço'),
+        ('msg_motoboy_acionado', '✅ Motoboy acionado! Ele já recebeu os detalhes e entrará em contato com o suporte em breve.', '17. Mensagem para o cliente após acionar motoboy'),
+        ('msg_pedir_agendamento', '🗓️ Certo! Por favor, digite a *data e hora* que você gostaria de agendar a entrega (ex: "Amanhã às 14h").\n\nOu digite *0* para cancelar.', '18. Pedido da data/hora para agendamento'),
+        ('msg_entrega_agendada', '✅ Entrega agendada para *{AGENDAMENTO}*! O motoboy foi notificado. Obrigado pela sua compra!', '19. Confirmação do agendamento para o cliente'),
+        ('msg_motoboy_urgente', '📦 *NOVA ENTREGA - URGENTE!*\n\n*ID:* {ID_PEDIDO}\n*Produto:* {NOME_PRODUTO}\n*Retirada:* {ENDERECO_RETIRADA}\n*Entrega:* {ENDERECO_CLIENTE}\n*Cliente:* {NOME_CLIENTE}', 'Template da mensagem para entrega imediata'),
+        ('msg_motoboy_agendado', '🗓️ *ENTREGA AGENDADA!*\n\n*ID:* {ID_PEDIDO}\n*Data/Hora:* {AGENDAMENTO}\n*Produto:* {NOME_PRODUTO}\n*Retirada:* {ENDERECO_RETIRADA}\n*Entrega:* {ENDERECO_CLIENTE}\n*Cliente:* {NOME_CLIENTE}', 'Template da mensagem para entrega agendada'),
+        ('ia_ativada', '0', 'Ativar Respostas com IA? (1 para Sim, 0 para Não).'),
+        ('ia_trigger_character', '??', 'Gatilho para acionar a IA (ex: ??, !, /ia).'),
+        ('ia_api_key', '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', 'Chave da API da OpenRouter.ai'),
+        ('ia_api_base', 'https://openrouter.ai/api/v1', 'URL Base da API da OpenRouter.ai'),
+        ('ia_system_prompt', 'Você é um assistente virtual da empresa HiperFoco. Responda de forma direta, objetiva e útil.', 'Instrução inicial (prompt de sistema) para a IA.'),
+        ('modo_operacao', 'PADRAO', 'Modo de Operação do Bot (PADRAO, HIBRIDO, IA_GATILHO, IA_TOTAL)'),
+        ('ia_auto_aprendizado', '0', 'Auto-Aprendizado Simulado (1=Ativado, 0=Desativado)'),
+        ('ativar_edicao_id_falha', '1', '20. Falha OCR: Permitir edição do ID? (1=Sim, 0=Não)'),
+        ('msg_falha_ocr_menu', '❌ Comprovante NÃO confirmado.\nO que deseja fazer?\n\n1️⃣ Digitar novo ID\n2️⃣ Enviar outra imagem\n3️⃣ Cancelar pedido', '21. Menu de opções quando o comprovante falha.'),
+        ('msg_pedir_id_correcao', 'Ok. Qual o ID de transação correto?', '22. Mensagem pedindo a correção do ID.'),
+        ('msg_id_corrigido', '✅ ID corrigido para *{ID_PARCIAL}*. Envie a *IMAGEM do comprovante* de novo.', '23. Mensagem de confirmação da correção do ID.'),
+        ('msg_pedido_cancelado', 'Seu pedido foi cancelado.', '24. Mensagem ao cancelar o pedido no menu de falha.'),
+        ('msg_cancelamento_geral', 'Atendimento cancelado. Se precisar, é só chamar de novo.', '25. Mensagem ao usar uma opção de cancelamento/saída.'),
+        ('ativar_venda_direta_digital', '1', '26. Venda Direta Digital: Iniciar venda ao digitar código? (1=Sim, 0=Não)'),
+        ('ativar_venda_direta_fisico', '1', '27. Venda Direta Físico: Iniciar venda ao digitar código? (1=Sim, 0=Não)'),
+        ('ativar_venda_direta_agendamento', '1', '27a. Venda Direta Agendamento: Iniciar ao digitar código? (1=Sim, 0=Não)'),
+        ('serpapi_api_key', 'SUA_CHAVE_API_AQUI', '28. Chave da API da SerpApi (para busca online)'),
+        ('msg_agendamento_finalizado', 'Agradecemos a preferência!', '29. Mensagem de agradecimento para agendamento finalizado.'),
+        ('msg_confirmar_agendamento', 'Confirma seu agendamento:\n\n*{AGENDAMENTO_INFO}*\n\n1️⃣ Confirmar\n2️⃣ Cancelar', '30. Mensagem para confirmar o agendamento (nome e horário).'),
+        ('msg_lembrete_agendamento', '⏰ Lembrete: Você tem um agendamento para *{AGENDAMENTO}* em 1 hora, no endereço: *{LOCAL_RETIRADA}*. Te esperamos! 😊', '31. Mensagem de lembrete de agendamento.'),
+        ('msg_pedir_nome_agendamento', 'Por favor, digite seu *Nome Completo* para o agendamento.', '32. Mensagem para pedir o nome completo para agendamento.')
+    ]
+    for chave, valor, descricao in configuracoes_padrao:
+        cursor.execute("INSERT OR IGNORE INTO configuracoes (chave, valor, descricao) VALUES (?, ?, ?)", (chave, valor, descricao))
+    if cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        logging.info("Adicionando usuários administradores padrão...")
+        admin_painel_password_hash = generate_password_hash('adminpass')
+        admin_full_password_hash = generate_password_hash('fullpass')
+        cursor.execute("INSERT INTO users (username, password_hash, access_level) VALUES (?, ?, ?)", ('admin', admin_painel_password_hash, 'admin_painel'))
+        cursor.execute("INSERT INTO users (username, password_hash, access_level) VALUES (?, ?, ?)", ('adminfull', admin_full_password_hash, 'admin_full'))
+    conn.commit()
+    conn.close()
+
+with app.app_context(): init_db()
+
+@app.template_filter('timestamp_to_datetime')
+def timestamp_to_datetime_filter(ts):
+    try: return datetime.fromtimestamp(float(ts)).strftime('%d/%m/%Y %H:%M:%S') if ts else "N/A"
+    except: return "Data inválida"
+@app.template_filter('format_currency')
+def format_currency_filter(value):
+    try: return f"R$ {Decimal(str(value) or '0'):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except: return "R$ 0,00"
+
+def formatar_valor_pix(valor): return f"{float(valor or 0):.2f}".replace(",", ",")
+def gerar_id_pedido(): return ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+def add_text_action(actions_list, text_content, delay=0):
+    if text_content: actions_list.append({"type": "text", "content": text_content, "delay": delay})
+def add_image_b64_action(actions_list, image_b64_content, caption="", delay=0):
+    actions_list.append({"type": "image_b64", "content": image_b64_content, "caption": caption, "delay": delay})
+def add_send_to_jid_action(actions_list, target_jid, text_content):
+    actions_list.append({"type": "send_to_jid", "target_jid": target_jid, "content": text_content})
+def get_all_products_dict():
+    conn = get_db_connection()
+    produtos_db = conn.execute("SELECT * FROM produtos").fetchall()
+    conn.close()
+    return {p['codigo'].lower().strip(): dict(p) for p in produtos_db}
+def get_all_configs_dict():
+    conn = get_db_connection()
+    config_db = conn.execute("SELECT chave, valor FROM configuracoes").fetchall()
+    conn.close()
+    return {row['chave']: row['valor'] for row in config_db}
+def get_custom_responses():
+    conn = get_db_connection()
+    respostas_db = conn.execute("SELECT gatilho, conteudo_resposta, correspondencia_parcial FROM respostas_personalizadas").fetchall()
+    conn.close()
+    return respostas_db
+def cancelar_atendimento(sender_id, configuracoes):
+    cart = user_cart.pop(sender_id, None)
+    if cart and cart.get('idPedido'):
+        conn = get_db_connection()
+        conn.execute("UPDATE pedidos SET status = ?, timestamp_pagamento = ? WHERE id = ?", ('CANCELADO', time.time(), cart['idPedido']))
+        conn.commit()
+        conn.close()
+    user_state.pop(sender_id, None)
+    return configuracoes.get('msg_cancelamento_geral', 'Atendimento cancelado.')
+
+def iniciar_fluxo_de_venda(sender_id, produto, configuracoes):
+    id_pedido_gerado = gerar_id_pedido()
+    user_cart[sender_id] = {'codigo': produto['codigo'], 'nome': produto['nome'], 'valor': produto['valor'], 'pix_code': produto['pix_code'], 'idPedido': id_pedido_gerado}
+    conn = get_db_connection()
+    conn.execute("INSERT INTO pedidos (id, cliente_jid, produto_nome, valor_esperado, valor_pago, timestamp_pedido, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (id_pedido_gerado, sender_id, produto['nome'], float(produto['valor']), 0.0, time.time(), "AGUARDANDO_COMPROVANTE"))
+    conn.commit()
+    conn.close()
+    user_state[sender_id] = {"state": "aguardando_opcao_pagamento", "timestamp": time.time()}
+    menu_selecao = configuracoes.get('msg_menu_pos_selecao')
+    msg_detalhes = (f"{configuracoes.get('msg_detalhes_produto')}\n\n📦 *{produto['nome']}*\n💰 *R$ {formatar_valor_pix(produto['valor'])}*\n🆔 *{id_pedido_gerado}*\n\n{menu_selecao}")
+    return msg_detalhes
+
+def send_welcome_menu(sender_id, push_name, configuracoes, response_actions):
+    user_cart.pop(sender_id, None)
+    if configuracoes.get('usar_menu_avancado') == '1':
+        user_state[sender_id] = {"state": "aguardando_opcao_menu_avancado", "timestamp": time.time()}
+        msg_boas_vindas = configuracoes.get('msg_boas_vindas_avancado').format(NOME_CLIENTE=push_name)
+        opcoes_menu = "\n\n1️⃣ Ver Produtos\n2️⃣ Suporte (TI)\n3️⃣ HiperBoot\n4️⃣ Conversa Normal"
+        mensagem_completa = msg_boas_vindas + opcoes_menu
+        add_text_action(response_actions, mensagem_completa, delay=1000)
+    else:
+        user_state[sender_id] = {"state": "aguardando_opcao_inicial", "timestamp": time.time()}
+        mensagem_completa = configuracoes.get('msg_boas_vindas').format(NOME_CLIENTE=push_name)
+        add_text_action(response_actions, mensagem_completa, delay=1000)
+
+@app.route('/webhook', methods=['POST'])
+async def whatsapp_webhook():
+    payload = request.get_json()
+    sender_id = payload.get('senderId')
+    push_name = payload.get('pushName', 'Cliente')
+    text = payload.get('text', '')
+    message_type = payload.get('messageType')
+    image_data_b64 = payload.get('imageData')
+    response_actions = []
+    configuracoes = get_all_configs_dict()
+    produtos = get_all_products_dict()
+    texto_normalizado = text.lower().strip()
+    state_info = user_state.get(sender_id, {})
+    current_state = state_info.get("state", "inicial")
+    if sender_id in user_state:
+        user_state[sender_id]['timestamp'] = time.time()
+    
+    if texto_normalizado == "0" and current_state not in ['inicial', 'conversa_humana']:
+        add_text_action(response_actions, cancelar_atendimento(sender_id, configuracoes), delay=1000)
+        return jsonify({"actions": response_actions})
+    try:
+        # --- ORDEM DE PRIORIDADE CORRIGIDA ---
+
+        # 1. Gatilhos de Menu (Sempre disponíveis para reiniciar o fluxo)
+        if texto_normalizado in ["hiperboot", "menu"]:
+            send_welcome_menu(sender_id, push_name, configuracoes, response_actions)
+            return jsonify({"actions": response_actions})
+
+        # 2. Respostas Personalizadas (Sempre disponíveis)
+        custom_responses = get_custom_responses()
+        for resp in custom_responses:
+            gatilho, match = resp['gatilho'].lower().strip(), False
+            if resp['correspondencia_parcial'] == 1:
+                if gatilho in texto_normalizado: match = True
+            else:
+                if gatilho == texto_normalizado: match = True
+            if match:
+                logging.info(f"[*] Rota: RESPOSTA_PADRAO (Gatilho: '{gatilho}')")
+                conteudo_formatado = resp['conteudo_resposta'].format(NOME_CLIENTE=push_name)
+                add_text_action(response_actions, conteudo_formatado, delay=1000)
+                return jsonify({"actions": response_actions})
+
+        # 3. Venda Direta por Código de Produto (Apenas no estado inicial ou conversa humana)
+        if current_state in ['inicial', 'conversa_humana'] and texto_normalizado in produtos:
+            produto_selecionado = produtos[texto_normalizado]
+            tipo_produto = produto_selecionado.get('tipo_produto', 'FISICO')
+            venda_direta_ativada = (tipo_produto == 'DIGITAL' and configuracoes.get('ativar_venda_direta_digital') == '1') or \
+                                   (tipo_produto == 'FISICO' and configuracoes.get('ativar_venda_direta_fisico') == '1') or \
+                                   (tipo_produto == 'AGENDAMENTO' and configuracoes.get('ativar_venda_direta_agendamento') == '1')
+            if venda_direta_ativada:
+                logging.info(f"[*] Rota: VENDA_DIRETA para o produto '{texto_normalizado}'")
+                if tipo_produto == 'AGENDAMENTO':
+                    user_cart[sender_id] = {'codigo': produto_selecionado['codigo'], 'nome': produto_selecionado['nome'], 'valor': produto_selecionado['valor'], 'idPedido': gerar_id_pedido()}
+                    conn = get_db_connection()
+                    conn.execute("INSERT INTO pedidos (id, cliente_jid, produto_nome, valor_esperado, valor_pago, timestamp_pedido, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                 (user_cart[sender_id]['idPedido'], sender_id, produto_selecionado['nome'], float(produto_selecionado['valor']), 0.0, time.time(), "AGUARDANDO_NOME_COMPLETO_AGENDAMENTO"))
+                    conn.commit()
+                    conn.close()
+                    add_text_action(response_actions, configuracoes.get('msg_pedir_nome_agendamento'), delay=1000)
+                    user_state[sender_id] = {"state": "aguardando_nome_agendamento", "timestamp": time.time()}
+                else:
+                    add_text_action(response_actions, iniciar_fluxo_de_venda(sender_id, produto_selecionado, configuracoes), delay=1000)
+                return jsonify({"actions": response_actions})
+        
+        # 4. Boas-vindas Automático (Apenas para o primeiro contato de todos)
+        if not state_info and configuracoes.get('ativar_boas_vindas_e_followup') == '1':
+            send_welcome_menu(sender_id, push_name, configuracoes, response_actions)
+            return jsonify({"actions": response_actions})
+
+        # --- FLUXO DE ESTADOS ---
+        if current_state == 'aguardando_opcao_menu_avancado':
+            if texto_normalizado == "1":
+                lista_produtos_str = "\n".join([f"*{k.upper()}*: {p['nome']} (R$ {formatar_valor_pix(p['valor'])})" for k, p in produtos.items()])
+                add_text_action(response_actions, f"{configuracoes.get('msg_ver_produtos_titulo')}\n\n{lista_produtos_str}\n\n{configuracoes.get('msg_pedir_codigo_apos_lista')}", delay=1000)
+                user_state[sender_id] = {"state": "aguardando_codigo_produto", "timestamp": time.time()}
+            elif texto_normalizado == "2":
+                add_text_action(response_actions, configuracoes.get('msg_suporte_ti'), delay=1000)
+                user_state[sender_id] = {"state": "aguardando_problema_suporte", "timestamp": time.time()}
+            elif texto_normalizado == "3":
+                add_text_action(response_actions, configuracoes.get('msg_link_hiperboot'), delay=1000)
+                add_text_action(response_actions, configuracoes.get('link_do_hiperboot'), delay=500)
+                user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+            elif texto_normalizado == "4":
+                add_text_action(response_actions, configuracoes.get('msg_conversa_normal'), delay=1000)
+                user_state[sender_id] = {"state": "conversa_humana", "timestamp": time.time()}
+                user_cart.pop(sender_id, None)
+            else:
+                add_text_action(response_actions, configuracoes.get('msg_opcao_invalida'), delay=1000)
+        
+        elif current_state == 'aguardando_problema_suporte':
+            logging.info(f"[SUPORTE TI] Cliente {sender_id} reportou: {text}")
+            add_text_action(response_actions, configuracoes.get('msg_suporte_registrado'), delay=1000)
+            user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+
+        elif current_state == 'aguardando_codigo_produto':
+            if texto_normalizado in produtos:
+                p = produtos[texto_normalizado]
+                if p.get('tipo_produto') == 'AGENDAMENTO':
+                    user_cart[sender_id] = {'codigo': p['codigo'], 'nome': p['nome'], 'valor': p['valor'], 'idPedido': gerar_id_pedido()}
+                    conn = get_db_connection()
+                    conn.execute("INSERT INTO pedidos (id, cliente_jid, produto_nome, valor_esperado, valor_pago, timestamp_pedido, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                 (user_cart[sender_id]['idPedido'], sender_id, p['nome'], float(p['valor']), 0.0, time.time(), "AGUARDANDO_NOME_COMPLETO_AGENDAMENTO"))
+                    conn.commit()
+                    conn.close()
+                    add_text_action(response_actions, configuracoes.get('msg_pedir_nome_agendamento'), delay=2000)
+                    user_state[sender_id] = {"state": "aguardando_nome_agendamento", "timestamp": time.time()}
+                else:
+                    add_text_action(response_actions, iniciar_fluxo_de_venda(sender_id, p, configuracoes), delay=1000)
+            else:
+                add_text_action(response_actions, configuracoes.get('msg_codigo_invalido'), delay=1000)
+
+        elif current_state == 'aguardando_nome_agendamento':
+            cart = user_cart.get(sender_id)
+            if not cart:
+                add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+                user_state.pop(sender_id, None)
+                return jsonify({"actions": response_actions})
+            nome_completo_cliente = text
+            user_cart[sender_id]['nome_completo_agendamento'] = nome_completo_cliente
+            conn = get_db_connection()
+            conn.execute("UPDATE pedidos SET endereco_entrega = ?, status = ? WHERE id = ?", (nome_completo_cliente, 'AGUARDANDO_DADOS_AGENDAMENTO', cart['idPedido']))
+            conn.commit()
+            conn.close()
+            add_text_action(response_actions, "Ótimo! Agora, por favor, digite o *Dia e o Horário* desejado (ex: '15/07 às 14h').", delay=2000)
+            user_state[sender_id] = {"state": "aguardando_dados_agendamento", "timestamp": time.time()}
+
+        elif current_state == 'aguardando_dados_agendamento':
+            cart = user_cart.get(sender_id)
+            if not cart:
+                add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+                user_state.pop(sender_id, None)
+                return jsonify({"actions": response_actions})
+            data_hora_agendamento = text
+            user_cart[sender_id]['data_hora_agendamento'] = data_hora_agendamento
+            nome = user_cart[sender_id].get('nome_completo_agendamento', push_name)
+            agendamento_info_completa = f"{nome}, {data_hora_agendamento}"
+            user_cart[sender_id]['agendamento_cliente'] = agendamento_info_completa
+            add_text_action(response_actions, configuracoes.get('msg_confirmar_agendamento').format(AGENDAMENTO_INFO=agendamento_info_completa), delay=2000)
+            user_state[sender_id] = {'state': 'confirmando_agendamento', 'timestamp': time.time()}
+
+        elif current_state == 'confirmando_agendamento':
+            cart = user_cart.get(sender_id)
+            if not cart:
+                add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+                user_state.pop(sender_id, None)
+                return jsonify({"actions": response_actions})
+            if texto_normalizado == "1":
+                conn = get_db_connection()
+                conn.execute("UPDATE pedidos SET agendamento_entrega = ?, status = ?, timestamp_pagamento = ? WHERE id = ?",
+                             (cart.get('agendamento_cliente'), 'Agendamento - Pendente', time.time(), cart['idPedido']))
+                conn.commit()
+                conn.close()
+                add_text_action(response_actions, configuracoes.get('msg_agendamento_finalizado'), delay=2000)
+                user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+            elif texto_normalizado == "2":
+                add_text_action(response_actions, cancelar_atendimento(sender_id, configuracoes), delay=1000)
+            else:
+                add_text_action(response_actions, configuracoes.get('msg_opcao_invalida'), delay=1000)
+        
+        elif current_state == 'aguardando_opcao_pagamento':
+            p = user_cart.get(sender_id, {})
+            if texto_normalizado == "1":
+                add_text_action(response_actions, f"{configuracoes.get('msg_resumo_pix')}\n\n📦 {p.get('nome')}\n💰 *R$ {formatar_valor_pix(p.get('valor'))}", delay=1000)
+                pix_code = p.get('pix_code', '')
+                if pix_code:
+                    img_buffer = BytesIO()
+                    qrcode.make(pix_code).save(img_buffer, kind='png')
+                    img_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+                    add_image_b64_action(response_actions, img_b64, configuracoes.get('msg_caption_qrcode'), delay=1000)
+                    add_text_action(response_actions, pix_code, delay=500)
+                add_text_action(response_actions, configuracoes.get('msg_pedir_id_transacao'), delay=1000)
+                user_state[sender_id] = {'state': 'aguardando_id_transacao', 'timestamp': time.time()}
+            elif texto_normalizado == "2":
+                user_state[sender_id] = {'state': 'aguardando_codigo_produto', 'timestamp': time.time()}
+                lista_produtos_str = "\n".join([f"*{k.upper()}*: {p['nome']} (R$ {formatar_valor_pix(p['valor'])})" for k, p in produtos.items()])
+                add_text_action(response_actions, f"{configuracoes.get('msg_ver_produtos_titulo')}\n\n{lista_produtos_str}\n\n{configuracoes.get('msg_pedir_codigo_apos_lista')}", delay=1000)
+            elif texto_normalizado == "3":
+                add_text_action(response_actions, cancelar_atendimento(sender_id, configuracoes), delay=1000)
+            else:
+                add_text_action(response_actions, configuracoes.get('msg_opcao_invalida'), delay=1000)
+
+        elif current_state == 'aguardando_id_transacao':
+             if len(texto_normalizado) >= 4:
+                user_cart[sender_id]['primeiros_4_digitos_pix_cliente'] = texto_normalizado
+                add_text_action(response_actions, configuracoes.get('msg_id_registrado').format(ID_PARCIAL=texto_normalizado.upper()), delay=1000)
+                user_state[sender_id] = {"state": "aguardando_comprovante", "timestamp": time.time()}
+             else:
+                add_text_action(response_actions, configuracoes.get('msg_id_invalido'), delay=1000)
+
+        elif current_state == 'aguardando_comprovante':
+            if message_type == "imageMessage" and image_data_b64:
+                cart = user_cart.get(sender_id)
+                if not cart:
+                    add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+                    user_state.pop(sender_id, None)
+                    return jsonify({"actions": response_actions})
+                add_text_action(response_actions, "⌚ Verificando o pagamento...", delay=1000)
+                try:
+                    ocr_payload = {"imageData": image_data_b64, "expectedValue": float(cart['valor']), "expectedIdPartial": cart.get('primeiros_4_digitos_pix_cliente', '')}
+                    ocr_response = requests.post(OCR_SERVICE_URL, json=ocr_payload, timeout=60)
+                    ocr_response.raise_for_status()
+                    ocr_result = ocr_response.json()
+                    if ocr_result.get('success'):
+                        conn = get_db_connection()
+                        produto_info = conn.execute("SELECT tipo_produto, link_produto FROM produtos WHERE codigo = ?", (cart['codigo'],)).fetchone()
+                        pagador_nome = ocr_result.get('payerName'); pagamento_data_hora = ocr_result.get('transactionDateTime')
+                        conn.execute("UPDATE pedidos SET valor_pago = ?, id_transacao_pix = ?, status = ?, timestamp_pagamento = ?, pagador_nome_pix = ?, pagamento_data_pix = ? WHERE id = ?",
+                                     (float(cart['valor']), ocr_result.get('transactionId'), 'PAGO_OCR_VALIDADO', time.time(), pagador_nome, pagamento_data_hora, cart['idPedido']))
+                        add_text_action(response_actions, configuracoes.get('msg_confirmacao_pagamento'), delay=2000)
+                        if produto_info and produto_info['tipo_produto'] == 'DIGITAL':
+                            link = produto_info['link_produto']
+                            if link: add_text_action(response_actions, f"✅ Seu produto digital está pronto!\n\nAcesse através do link:\n{link}", delay=1000)
+                            else: add_text_action(response_actions, "✅ Seu produto digital foi liberado.", delay=1000)
+                            conn.execute("UPDATE pedidos SET status = ? WHERE id = ?", ('DIGITAL_ENTREGUE', cart['idPedido']))
+                            user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+                        else:
+                            add_text_action(response_actions, configuracoes.get('msg_pedir_endereco'), delay=2000)
+                            user_state[sender_id] = {"state": "aguardando_endereco", "timestamp": time.time()}
+                        conn.commit()
+                        conn.close()
+                    else:
+                        add_text_action(response_actions, configuracoes.get('msg_falha_ocr_menu'), delay=2000)
+                except Exception as e:
+                    logging.error(f"Erro no OCR: {e}")
+                    add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+            elif texto_normalizado == "1":
+                if configuracoes.get('ativar_edicao_id_falha') == '1':
+                    add_text_action(response_actions, configuracoes.get('msg_pedir_id_correcao'), delay=1000)
+                    user_state[sender_id] = {'state': 'aguardando_correcao_id_transacao', 'timestamp': time.time()}
+                else: add_text_action(response_actions, configuracoes.get('msg_opcao_invalida'), delay=1000)
+            elif texto_normalizado == "2": add_text_action(response_actions, "Ok, aguardo a nova imagem do comprovante.", delay=1000)
+            elif texto_normalizado == "3": add_text_action(response_actions, cancelar_atendimento(sender_id, configuracoes), delay=1000)
+            else:
+                if current_state == 'aguardando_comprovante': add_text_action(response_actions, "Por favor, envie uma IMAGEM do comprovante ou escolha uma das opções do menu.", delay=1000)
+                else: add_text_action(response_actions, configuracoes.get('msg_opcao_invalida'), delay=1000)
+
+        elif current_state == 'aguardando_correcao_id_transacao':
+            if len(texto_normalizado) >= 4:
+                user_cart[sender_id]['primeiros_4_digitos_pix_cliente'] = texto_normalizado
+                add_text_action(response_actions, configuracoes.get('msg_id_corrigido').format(ID_PARCIAL=texto_normalizado.upper()), delay=1000)
+                user_state[sender_id] = {"state": "aguardando_comprovante", "timestamp": time.time()}
+            else:
+                add_text_action(response_actions, configuracoes.get('msg_id_invalido'), delay=1000)
+                add_text_action(response_actions, configuracoes.get('msg_pedir_id_correcao'), delay=1000)
+
+        elif current_state == 'aguardando_endereco':
+            user_cart[sender_id]['endereco_cliente'] = text
+            add_text_action(response_actions, configuracoes.get('msg_confirmar_endereco').format(ENDERECO_CLIENTE=text), delay=2000)
+            user_state[sender_id] = {"state": "confirmando_endereco", "timestamp": time.time()}
+
+        elif current_state == 'confirmando_endereco':
+            if texto_normalizado == "1":
+                add_text_action(response_actions, configuracoes.get('msg_endereco_confirmado'), delay=1000)
+                user_state[sender_id] = {"state": "decidindo_entrega", "timestamp": time.time()}
+            elif texto_normalizado == "2":
+                add_text_action(response_actions, configuracoes.get('msg_pedir_endereco'), delay=1000)
+                user_state[sender_id] = {"state": "aguardando_endereco", "timestamp": time.time()}
+            else:
+                if msg := configuracoes.get('msg_opcao_invalida', ''): add_text_action(response_actions, msg, delay=1000)
+
+        elif current_state == 'decidindo_entrega':
+            cart = user_cart.get(sender_id)
+            if not cart:
+                add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+                user_state.pop(sender_id, None)
+                return jsonify({"actions": response_actions})
+            elif texto_normalizado == "1":
+                motoboy_number_full_jid = configuracoes.get('num_motoboy') + "@s.whatsapp.net"
+                msg_motoboy = configuracoes.get('msg_motoboy_urgente').format(ID_PEDIDO=cart.get('idPedido'), NOME_PRODUTO=cart.get('nome'), ENDERECO_RETIRADA=configuracoes.get('local_retirada'), ENDERECO_CLIENTE=cart.get('endereco_cliente'), NOME_CLIENTE=push_name)
+                add_send_to_jid_action(response_actions, motoboy_number_full_jid, msg_motoboy)
+                add_text_action(response_actions, configuracoes.get('msg_motoboy_acionado'), delay=2000)
+                user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+            elif texto_normalizado == "2":
+                add_text_action(response_actions, configuracoes.get('msg_pedir_agendamento'), delay=2000)
+                user_state[sender_id] = {"state": "agendando_entrega", "timestamp": time.time()}
+            elif texto_normalizado == "3":
+                add_text_action(response_actions, cancelar_atendimento(sender_id, configuracoes), delay=1000)
+            else:
+                add_text_action(response_actions, configuracoes.get('msg_opcao_invalida'), delay=1000)
+
+        elif current_state == 'agendando_entrega':
+            cart = user_cart.get(sender_id)
+            if not cart:
+                add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+                user_state.pop(sender_id, None)
+            else:
+                agendamento = text
+                conn = get_db_connection()
+                conn.execute("UPDATE pedidos SET agendamento_entrega = ?, endereco_entrega = ?, motoboy_solicitado = 1, motoboy_status = ?, status = ? WHERE id = ?",
+                             (agendamento, cart.get('endereco_cliente'), 'SOLICITADO_AGENDADO', 'ENTREGA_AGENDADA', cart['idPedido']))
+                conn.commit()
+                conn.close()
+                add_text_action(response_actions, configuracoes.get('msg_entrega_agendada').format(AGENDAMENTO=agendamento), delay=2000)
+                user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+        
+        elif current_state not in ['inicial', 'conversa_humana']:
+            add_text_action(response_actions, cancelar_atendimento(sender_id, configuracoes), delay=1000)
+
+    except Exception as e:
+        logging.error(f"Erro no fluxo de vendas para {sender_id}: {e}", exc_info=True)
+        add_text_action(response_actions, configuracoes.get('msg_erro_interno'), delay=1000)
+        user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+    return jsonify({"actions": response_actions})
+
+def check_inactivity():
+    with app.app_context():
+        configuracoes = get_all_configs_dict()
+        if configuracoes.get('ativar_boas_vindas_e_followup') != '1': return
+        inactive_threshold = 7200
+        current_time = time.time()
+        users_to_check = list(user_state.items())
+        for sender_id, state_info in users_to_check:
+            if state_info.get("state") in ["inicial", "conversa_humana"]: continue
+            last_activity = state_info.get("timestamp", current_time)
+            if current_time - last_activity > inactive_threshold:
+                logging.info(f"Usuário {sender_id} está inativo. Enviando followup.")
+                response_actions = []
+                msg_followup = configuracoes.get('msg_followup_inatividade')
+                if configuracoes.get('usar_menu_avancado') == '1':
+                    opcoes_menu = "\n\n1️⃣ Ver Produtos\n2️⃣ Suporte (TI)\n3️⃣ HiperBoot\n4️⃣ Conversa Normal"
+                else:
+                    opcoes_menu = "\n\n1️⃣ Ver Produtos\n2️⃣ Sair"
+                mensagem_completa = msg_followup + opcoes_menu
+                add_text_action(response_actions, mensagem_completa, delay=1000)
+                try:
+                    requests.post("http://127.0.0.1:3000/enviar_mensagem_externa_actions", json={"target_jid": sender_id, "actions": response_actions}, timeout=10)
+                except requests.exceptions.RequestException as e:
+                    logging.error(f"Erro ao enviar followup para {sender_id}: {e}")
+                user_state.pop(sender_id, None); user_cart.pop(sender_id, None)
+
+@app.route('/enviar_mensagem_externa_actions', methods=['POST'])
+def enviar_mensagem_externa_actions():
+    data = request.get_json()
+    logging.info(f"[SCHEDULER] Recebeu payload para envio: {data}")
+    return jsonify({"status": "success", "message": "Ações recebidas."})
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if current_user.is_authenticated: return redirect(url_for('dashboard'))
+    if request.method == 'POST':
+        user = User.get_by_username(request.form['username'])
+        if user and check_password_hash(user.password_hash, request.form['password']):
+            login_user(user)
+            return redirect(request.args.get('next') or url_for('dashboard'))
+        else: flash('Nome de usuário ou senha inválidos.', 'danger')
+    return render_template('login.html')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('Você foi desconectado.', 'info')
+    return redirect(url_for('login'))
+
+@app.route('/')
+@login_required
+def dashboard():
+    conn = get_db_connection()
+    pedidos = conn.execute("SELECT * FROM pedidos ORDER BY timestamp_pedido DESC").fetchall()
+    stats_query = "SELECT COUNT(id), SUM(valor_pago) FROM pedidos WHERE status IN ('DIGITAL_ENTREGUE', 'AGENDAMENTO_CONCLUIDO', 'ENTREGA_AGENDADA', 'PAGO_OCR_VALIDADO')"
+    stats = conn.execute(stats_query).fetchone()
+    conn.close()
+    return render_template('dashboard.html', pedidos_db=pedidos, total_vendas_confirmadas=stats[0] or 0, total_arrecadado=stats[1] or 0.0)
+
+@app.route('/atualizar-status-pedido/<string:id>', methods=['POST'])
+@login_required
+def atualizar_status_pedido(id):
+    conn = get_db_connection()
+    try:
+        pedido = conn.execute("SELECT produto_nome, valor_esperado, status FROM pedidos WHERE id = ?", (id,)).fetchone()
+        if not pedido:
+            flash('Pedido não encontrado.', 'danger')
+            return redirect(url_for('dashboard'))
+        if pedido['status'] == 'Agendamento - Pendente':
+            valor_confirmado = float(pedido['valor_esperado'])
+            conn.execute("UPDATE pedidos SET status = ?, valor_pago = ?, timestamp_pagamento = ? WHERE id = ?", ('AGENDAMENTO_CONCLUIDO', valor_confirmado, time.time(), id))
+            conn.commit()
+            flash(f"Pagamento do agendamento '{pedido['produto_nome']}' confirmado com sucesso!", 'success')
+        else:
+            flash(f"Status do pedido '{id}' não permite confirmação manual.", 'danger')
+    except Exception as e:
+        logging.error(f"Erro ao confirmar pagamento manual do pedido {id}: {e}")
+        flash(f'Ocorreu um erro: {e}', 'danger')
+    finally: conn.close()
+    return redirect(url_for('dashboard'))
+
+@app.route('/excluir-pedido-pendente/<string:id>', methods=['POST'])
+@login_required
+def excluir_pedido_pendente(id):
+    conn = get_db_connection()
+    try:
+        pedido = conn.execute("SELECT status FROM pedidos WHERE id = ?", (id,)).fetchone()
+        if pedido and pedido['status'] not in ['PAGO_OCR_VALIDADO', 'DIGITAL_ENTREGUE', 'AGENDAMENTO_CONCLUIDO', 'ENTREGA_AGENDADA', 'Agendamento - Pendente']:
+            conn.execute("DELETE FROM pedidos WHERE id = ?", (id,))
+            conn.commit()
+            flash('Pedido pendente foi excluído com sucesso!', 'success')
+        else:
+            flash('Não é possível excluir um pedido que já foi pago ou está em andamento.', 'danger')
+    except Exception as e:
+        logging.error(f"Erro ao excluir pedido {id}: {e}")
+        flash('Ocorreu um erro ao tentar excluir o pedido.', 'danger')
+    finally: conn.close()
+    return redirect(url_for('dashboard'))
+
+@app.route('/gerenciar-configuracoes')
+@admin_full_required
+def gerenciar_configuracoes():
+    conn = get_db_connection()
+    configuracoes = conn.execute("SELECT * FROM configuracoes ORDER BY descricao").fetchall()
+    conn.close()
+    return render_template('gerenciar_configuracoes.html', configuracoes=configuracoes)
+
+@app.route('/salvar-configuracoes', methods=['POST'])
+@admin_full_required
+def salvar_configuracoes():
+    conn = get_db_connection()
+    try:
+        for chave, valor in request.form.items():
+             conn.execute("UPDATE configuracoes SET valor = ? WHERE chave = ?", (valor, chave))
+        conn.commit()
+        flash('Configurações salvas com sucesso!', 'success')
+    except Exception as e: flash(f'Erro ao salvar configurações: {e}', 'danger')
+    finally: conn.close()
+    return redirect(url_for('gerenciar_configuracoes'))
+
+@app.route('/gerenciar-produtos')
+@login_required
+def gerenciar_produtos():
+    conn = get_db_connection()
+    produtos = conn.execute("SELECT * FROM produtos ORDER BY nome").fetchall()
+    conn.close()
+    return render_template('gerenciar_produtos.html', produtos=produtos)
+
+@app.route('/adicionar-produto', methods=['POST'])
+@login_required
+def adicionar_produto():
+    conn = get_db_connection()
+    try:
+        tipo_produto = request.form['tipo_produto']
+        link_produto = request.form.get('link_produto', '') if tipo_produto == 'DIGITAL' else ''
+        conn.execute("INSERT INTO produtos (codigo, nome, valor, pix_code, tipo_produto, link_produto) VALUES (?, ?, ?, ?, ?, ?)", (request.form['codigo'], request.form['nome'], float(request.form['valor'].replace(',', '.')), request.form['pix_code'], tipo_produto, link_produto))
+        conn.commit()
+        flash('Produto adicionado com sucesso!', 'success')
+    except Exception as e: flash(f'Erro ao adicionar produto: {e}', 'danger')
+    finally:
+        if conn: conn.close()
+    return redirect(url_for('gerenciar_produtos'))
+
+@app.route('/excluir-produto/<string:codigo>', methods=['POST'])
+@login_required
+def excluir_produto(codigo):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM produtos WHERE codigo = ?", (codigo,))
+    conn.commit()
+    conn.close()
+    flash('Produto excluído com sucesso!', 'success')
+    return redirect(url_for('gerenciar_produtos'))
+
+@app.route('/editar-produto/<string:codigo>', methods=['GET'])
+@login_required
+def editar_produto(codigo):
+    conn = get_db_connection()
+    produto = conn.execute("SELECT * FROM produtos WHERE codigo = ?", (codigo,)).fetchone()
+    conn.close()
+    if not produto:
+        flash('Produto não encontrado!', 'danger')
+        return redirect(url_for('gerenciar_produtos'))
+    return render_template('editar_produto.html', produto=produto)
+
+@app.route('/atualizar-produto/<string:codigo>', methods=['POST'])
+@login_required
+def atualizar_produto(codigo):
+    nome, valor, pix_code, tipo_produto = request.form['nome'], request.form['valor'].replace(',', '.'), request.form['pix_code'], request.form['tipo_produto']
+    link_produto = request.form.get('link_produto', '') if tipo_produto == 'DIGITAL' else ''
+    conn = get_db_connection()
+    conn.execute("UPDATE produtos SET nome = ?, valor = ?, pix_code = ?, tipo_produto = ?, link_produto = ? WHERE codigo = ?", (nome, float(valor), pix_code, tipo_produto, link_produto, codigo))
+    conn.commit()
+    conn.close()
+    flash('Produto atualizado com sucesso!', 'success')
+    return redirect(url_for('gerenciar_produtos'))
+
+@app.route('/gerenciar-respostas')
+@login_required
+def gerenciar_respostas():
+    conn = get_db_connection()
+    respostas = conn.execute("SELECT * FROM respostas_personalizadas ORDER BY gatilho").fetchall()
+    conn.close()
+    return render_template('gerenciar_respostas.html', respostas_db=respostas)
+
+@app.route('/adicionar-resposta-personalizada', methods=['POST'])
+@login_required
+def adicionar_resposta_personalizada():
+    conn = get_db_connection()
+    try:
+        gatilho = request.form['gatilho'].lower().strip()
+        conteudo = request.form['conteudo_resposta']
+        parcial = 1 if 'correspondencia_parcial' in request.form else 0
+        conn.execute("INSERT INTO respostas_personalizadas (gatilho, tipo_resposta, conteudo_resposta, correspondencia_parcial) VALUES (?, 'texto', ?, ?)", (gatilho, conteudo, parcial))
+        conn.commit()
+        flash('Resposta personalizada adicionada!', 'success')
+    except sqlite3.IntegrityError: flash(f"Erro: O gatilho '{gatilho}' já existe.", 'danger')
+    except Exception as e: flash(f"Erro ao adicionar resposta: {e}", 'danger')
+    finally: conn.close()
+    return redirect(url_for('gerenciar_respostas'))
+
+@app.route('/excluir-resposta-personalizada/<int:id>', methods=['POST'])
+@login_required
+def excluir_resposta_personalizada(id):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM respostas_personalizadas WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    flash('Resposta personalizada excluída!', 'success')
+    return redirect(url_for('gerenciar_respostas'))
+
+@app.route('/gerenciar-gatilhos-ia')
+@admin_full_required
+def gerenciar_gatilhos_ia():
+    conn = get_db_connection()
+    gatilhos = conn.execute("SELECT * FROM ia_gatilhos ORDER BY gatilho").fetchall()
+    conn.close()
+    return render_template('gerenciar_gatilhos_ia.html', gatilhos=gatilhos)
+
+@app.route('/adicionar-gatilho-ia', methods=['POST'])
+@admin_full_required
+def adicionar_gatilho_ia():
+    conn = get_db_connection()
+    try:
+        gatilho = request.form['gatilho'].lower().strip()
+        conn.execute("INSERT INTO ia_gatilhos (gatilho) VALUES (?)", (gatilho,))
+        conn.commit()
+        flash('Gatilho de IA adicionado!', 'success')
+    except sqlite3.IntegrityError: flash(f"Erro: O gatilho '{gatilho}' já existe.", 'danger')
+    except Exception as e: flash(f"Erro ao adicionar gatilho: {e}", 'danger')
+    finally: conn.close()
+    return redirect(url_for('gerenciar_gatilhos_ia'))
+
+@app.route('/excluir-gatilho-ia/<int:id>', methods=['POST'])
+@admin_full_required
+def excluir_gatilho_ia(id):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM ia_gatilhos WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    flash('Gatilho de IA excluído!', 'success')
+    return redirect(url_for('gerenciar_gatilhos_ia'))
+
+@app.route('/gerenciar-prompts')
+@admin_full_required
+def gerenciar_prompts():
+    conn = get_db_connection()
+    prompts = conn.execute("SELECT * FROM ia_prompts ORDER BY nome_prompt").fetchall()
+    conn.close()
+    return render_template('gerenciar_prompts.html', prompts=prompts)
+
+@app.route('/adicionar-prompt', methods=['POST'])
+@admin_full_required
+def adicionar_prompt():
+    nome = request.form['nome_prompt']
+    conteudo = request.form['conteudo_prompt']
+    conn = get_db_connection()
+    try:
+        conn.execute("INSERT INTO ia_prompts (nome_prompt, conteudo_prompt) VALUES (?, ?)", (nome, conteudo))
+        conn.commit()
+        flash('Novo prompt adicionado com sucesso!', 'success')
+    except sqlite3.IntegrityError: flash(f'Erro: Já existe um prompt com o nome "{nome}".', 'danger')
+    finally: conn.close()
+    return redirect(url_for('gerenciar_prompts'))
+
+@app.route('/ativar-prompt/<int:id>', methods=['POST'])
+@admin_full_required
+def ativar_prompt(id):
+    conn = get_db_connection()
+    conn.execute("UPDATE ia_prompts SET is_active = 0")
+    conn.execute("UPDATE ia_prompts SET is_active = 1 WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    flash('Prompt ativado com sucesso!', 'success')
+    return redirect(url_for('gerenciar_prompts'))
+
+@app.route('/excluir-prompt/<int:id>', methods=['POST'])
+@admin_full_required
+def excluir_prompt(id):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM ia_prompts WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    flash('Prompt excluído com sucesso!', 'success')
+    return redirect(url_for('gerenciar_prompts'))
+
+@app.route('/gerenciar-aprendizado')
+@admin_full_required
+def gerenciar_aprendizado():
+    conn = get_db_connection()
+    exemplos = conn.execute("SELECT * FROM ia_aprendizado").fetchall()
+    conn.close()
+    return render_template('gerenciar_aprendizado.html', exemplos=exemplos)
+
+@app.route('/adicionar-exemplo', methods=['POST'])
+@admin_full_required
+def adicionar_exemplo():
+    pergunta = request.form['pergunta_exemplo']
+    resposta = request.form['resposta_ideal']
+    conn = get_db_connection()
+    conn.execute("INSERT INTO ia_aprendizado (pergunta_exemplo, resposta_ideal) VALUES (?, ?)", (pergunta, resposta))
+    conn.commit()
+    conn.close()
+    flash('Exemplo de aprendizado adicionado!', 'success')
+    return redirect(url_for('gerenciar_aprendizado'))
+
+@app.route('/excluir-exemplo/<int:id>', methods=['POST'])
+@admin_full_required
+def excluir_exemplo(id):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM ia_aprendizado WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    flash('Exemplo excluído!', 'success')
+    return redirect(url_for('gerenciar_aprendizado'))
+
+if __name__ == '__main__':
+    scheduler.init_app(app)
+    scheduler.start()
+    app.run(host='0.0.0.0', port=3000, debug=True, use_reloader=False)
+
