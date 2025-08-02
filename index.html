@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Comandos MikroTik</title>
+<title>Comandos NetBIOS e MikroTik - HyperFoco</title>
 <style>
   body {
     background-color: #000;
@@ -72,10 +72,30 @@
 </head>
 <body>
   <div class="container">
-    <h1>HyperFoco - Comandos MikroTik Interativos</h1>
+    <h1>HyperFoco - Comandos NetBIOS e MikroTik</h1>
     <p>Clique no botão copiar para copiar o comando desejado.</p>
 
-    <h2>Comandos Básicos</h2>
+    <h2>NetBIOS - Ver nomes na rede</h2>
+
+    <div class="cmd-block">
+      <pre>nbtscan 10.101.108.0/24</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Varre a rede 10.101.108.0/24 para mostrar IPs e nomes NetBIOS. Requer instalação: <code>sudo apt install nbtscan</code>.</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>nmap -sU -p 137 --script nbstat 10.101.108.0/24</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Usa Nmap para escanear a porta UDP 137 (NetBIOS) e listar nomes NetBIOS na rede.</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>nbtstat -A 10.101.108.X</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Mostra nome NetBIOS do host no Windows. Substitua X pelo número do host (ex: 15).</div>
+    </div>
+
+    <h2>MikroTik - Comandos Básicos</h2>
 
     <div class="cmd-block">
       <pre>/ip address print</pre>
@@ -135,7 +155,7 @@
       <div class="description">Remove o usuário limitado criado.</div>
     </div>
 
-    <h2>Gerenciar Tempo (Exemplo de Script para Desabilitar SSH após 30 minutos)</h2>
+    <h2>Gerenciar Tempo (Exemplo: Desabilitar SSH após 30 minutos)</h2>
 
     <div class="cmd-block">
       <pre>:
@@ -190,4 +210,4 @@
     }
   </script>
 </body>
-  </html>
+        </html>
