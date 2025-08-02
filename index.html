@@ -3,17 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>HyperFoco - Comandos MikroTik</title>
+<title>HyperFoco - Comandos MikroTik Interativos</title>
 <style>
-  /* Fundo preto e estilo neon azul */
   body {
     background-color: #000;
     color: #eee;
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    margin: 0;
-    padding: 20px;
+    margin: 0; padding: 20px;
   }
-
   h1, h2 {
     color: #00ffff;
     text-shadow:
@@ -22,100 +19,143 @@
       0 0 20px #00ffff,
       0 0 40px #00ffff;
   }
-
   h1 {
     font-size: 2.5em;
     margin-bottom: 0.2em;
   }
-
   h2 {
     margin-top: 2em;
     margin-bottom: 0.6em;
   }
-
-  pre {
-    background-color: #111;
-    padding: 15px;
-    border-radius: 8px;
-    color: #0ff;
-    font-size: 1em;
-    overflow-x: auto;
-    box-shadow:
-      0 0 5px #00ffff,
-      0 0 15px #00ffff;
-  }
-
-  p {
-    line-height: 1.4em;
-  }
-
-  /* Container centralizado */
   .container {
     max-width: 900px;
     margin: 0 auto;
   }
-
-  /* Rodapé pequeno */
-  footer {
-    text-align: center;
-    margin-top: 40px;
+  .cmd-block {
+    background-color: #111;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 15px;
+    box-shadow:
+      0 0 5px #00ffff,
+      0 0 15px #00ffff;
+    position: relative;
+  }
+  pre {
+    margin: 0 0 10px 0;
+    color: #0ff;
+    font-size: 1em;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  button.copy-btn {
+    position: absolute;
+    right: 15px;
+    top: 15px;
+    background-color: #00ffff;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+    color: #000;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+  }
+  button.copy-btn:hover {
+    background-color: #00bbcc;
+  }
+  .description {
     font-size: 0.9em;
-    color: #555;
+    color: #ccc;
   }
 </style>
 </head>
 <body>
   <div class="container">
-    <h1>HyperFoco - Comandos Básicos MikroTik</h1>
-    <p>Guia rápido e organizado para você dominar o MikroTik via terminal.</p>
+    <h1>HyperFoco - Comandos MikroTik Interativos</h1>
+    <p>Clique no botão copiar para copiar o comando desejado.</p>
 
-    <h2>1. Visualizar informações gerais</h2>
-    <pre>
-/ip address print             → Ver IPs configurados
-/ip route print               → Ver rotas configuradas
-/ip dns print                 → Ver configuração DNS
-/ip dhcp-client print         → Ver cliente DHCP
-/system identity print        → Ver nome do roteador
-    </pre>
+    <h2>Comandos Básicos</h2>
 
-    <h2>2. Internet e IP Público</h2>
-    <pre>
-/ip cloud print               → Ver IP público e DNS name (MyNetName)
-/tool netwatch                → Monitorar conectividade
-    </pre>
+    <div class="cmd-block">
+      <pre>/ip address print</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Lista todos os IPs configurados nas interfaces.</div>
+    </div>
 
-    <h2>3. Leases DHCP</h2>
-    <pre>
-/ip dhcp-server lease print   → Ver dispositivos conectados (DHCP leases)
-    </pre>
+    <div class="cmd-block">
+      <pre>/ip cloud print</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Mostra o IP público e o nome DNS do MikroTik Cloud DDNS.</div>
+    </div>
 
-    <h2>4. Firewall e NAT</h2>
-    <pre>
-/ip firewall filter print     → Ver regras de firewall
-/ip firewall nat print        → Ver regras NAT
-    </pre>
+    <div class="cmd-block">
+      <pre>/ip dhcp-server lease print</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Lista os dispositivos que receberam IP via DHCP.</div>
+    </div>
 
-    <h2>5. Acesso remoto e serviços</h2>
-    <pre>
-/ip service print             → Ver portas e serviços ativos (ex: SSH, Winbox)
-/ip service disable telnet    → Desativar Telnet
-/ip service enable ssh        → Ativar SSH
-    </pre>
+    <div class="cmd-block">
+      <pre>/ip firewall nat print</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Exibe as regras de NAT configuradas no roteador.</div>
+    </div>
 
-    <h2>6. Ver interfaces e status</h2>
-    <pre>
-/interface print              → Ver todas interfaces
-/interface wireless print     → Ver status do Wi-Fi
-    </pre>
+    <h2>Gerenciar SSH Remoto</h2>
 
-    <h2>7. Liberar SSH remoto temporariamente</h2>
-    <pre>
-/ip firewall filter add chain=input action=accept protocol=tcp dst-port=22 place-before=10 comment="Liberar SSH remoto temporariamente"
-    </pre>
+    <div class="cmd-block">
+      <pre>/ip firewall filter add chain=input action=accept protocol=tcp dst-port=22 place-before=10 comment="Liberar SSH remoto temporariamente"</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Libera o acesso SSH remoto temporariamente (coloque antes da regra de bloqueio).</div>
+    </div>
 
-    <footer>
-      &copy; 2025 HyperFoco by Érico Mendieta
-    </footer>
+    <div class="cmd-block">
+      <pre>/ip firewall filter remove [find comment="Liberar SSH remoto temporariamente"]</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Remove a regra que libera o SSH remoto temporário.</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>/ip firewall filter disable [find comment="Liberar SSH remoto temporariamente"]</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Desabilita a regra de SSH remoto temporário sem removê-la.</div>
+    </div>
+
+    <h2>Gerenciar Usuários</h2>
+
+    <div class="cmd-block">
+      <pre>/user add name=usuario_limitado group=read password=SENHA123</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Adiciona um usuário limitado (somente leitura) com senha.</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>/user remove usuario_limitado</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Remove o usuário limitado criado.</div>
+    </div>
+
+    <h2>Gerenciar Tempo (Exemplo de Script para Desabilitar SSH após 30 minutos)</h2>
+
+    <div class="cmd-block">
+      <pre>:
+/system scheduler add name=desliga_ssh interval=30m on-event="/ip firewall filter disable [find comment=\"Liberar SSH remoto temporariamente\"]" start-time=startup
+</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Cria uma tarefa agendada que desabilita a regra SSH temporária após 30 minutos.</div>
+    </div>
+
   </div>
+
+  <script>
+    function copyCommand(btn) {
+      const pre = btn.previousElementSibling;
+      const text = pre.innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.innerText = "Copiado!";
+        setTimeout(() => btn.innerText = "Copiar", 1500);
+      });
+    }
+  </script>
 </body>
-</html>
+                                                                                           </html>
