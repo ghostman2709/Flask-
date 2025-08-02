@@ -145,6 +145,38 @@
       <div class="description">Cria uma tarefa agendada que desabilita a regra SSH temporária após 30 minutos.</div>
     </div>
 
+    <h2>Backup e Download Automático do MikroTik</h2>
+
+    <div class="cmd-block">
+      <pre>/system backup save name=backup_config</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Cria um backup da configuração no roteador MikroTik.</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>/file print</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Lista os arquivos salvos no MikroTik, incluindo o backup criado.</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>scp usuario@IP_do_MikroTik:/backup_config.backup .</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">No seu PC local, usa SCP para baixar o arquivo de backup para a pasta atual.</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>ftp IP_do_MikroTik</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Conecta via FTP para baixar o backup manualmente (use usuário e senha do MikroTik).</div>
+    </div>
+
+    <div class="cmd-block">
+      <pre>/system backup load name=backup_config.backup</pre>
+      <button class="copy-btn" onclick="copyCommand(this)">Copiar</button>
+      <div class="description">Restaurar o backup no MikroTik (atenção: reinicia e substitui toda a configuração).</div>
+    </div>
+
   </div>
 
   <script>
@@ -158,4 +190,4 @@
     }
   </script>
 </body>
-                                                                                           </html>
+  </html>
