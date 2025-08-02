@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Hiper-Sorte</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: radial-gradient(circle at center, #000010, #000000);
+      color: gold;
+      font-family: 'Arial Black', sans-serif;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: 3em;
+      margin-top: 1em;
+      color: gold;
+      text-shadow: 0 0 10px #FFD700, 0 0 20px #FFA500;
+    }
+
+    .value {
+      font-size: 2em;
+      margin: 0.2em;
+      color: #00ffff;
+      text-shadow: 0 0 10px #00ffff;
+    }
+
+    #countdown {
+      font-size: 1.5em;
+      margin-top: 0.5em;
+      color: #ff00ff;
+      text-shadow: 0 0 10px #ff00ff;
+    }
+
+    button {
+      padding: 15px 30px;
+      font-size: 1.5em;
+      margin-top: 1.5em;
+      background-color: #00ffff;
+      color: #000;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      box-shadow: 0 0 15px #00ffff;
+      transition: transform 0.2s ease;
+    }
+
+    button:hover {
+      transform: scale(1.1);
+    }
+
+    #code {
+      margin-top: 1em;
+      font-size: 2em;
+      color: #00ff00;
+      text-shadow: 0 0 10px #00ff00;
+    }
+
+    .footer {
+      margin-top: 3em;
+      font-size: 1.2em;
+      color: #ccc;
+    }
+
+    a {
+      color: #FFD700;
+      text-decoration: none;
+      font-weight: bold;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h1>Hiper-Sorte</h1>
+  <div class="value">🎁 Sorteio de R$200</div>
+  <div id="countdown"></div>
+
+  <button onclick="gerarCodigo()">Gerar Código da Sorte</button>
+  <div id="code"></div>
+
+  <div class="footer">
+    Envie o código para <a href="https://wa.me/5555996043937?text=(sorte)-hiperfoco" target="_blank">WhatsApp para participar</a><br/>
+    A chave Pix será enviada após confirmação no WhatsApp.
+  </div>
+
+  <script>
+    function gerarCodigo() {
+      const numero = Math.floor(Math.random() * 1000) + 1;
+      const codigo = `HS-${numero.toString().padStart(4, '0')}`;
+      document.getElementById("code").innerText = `Seu código: ${codigo}`;
+    }
+
+    function startCountdown() {
+      const targetTime = new Date().getTime() + 24 * 60 * 60 * 1000;
+      const countdown = document.getElementById("countdown");
+
+      function updateCountdown() {
+        const now = new Date().getTime();
+        const distance = targetTime - now;
+
+        if (distance <= 0) {
+          countdown.innerHTML = "⏰ Tempo esgotado!";
+          return;
+        }
+
+        const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+        countdown.innerHTML = `⏳ Fim em ${hours}h ${minutes}m ${seconds}s`;
+        setTimeout(updateCountdown, 1000);
+      }
+
+      updateCountdown();
+    }
+
+    startCountdown();
+  </script>
+</body>
+</html>
