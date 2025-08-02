@@ -1,126 +1,121 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Hiper-Sorte</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      background: radial-gradient(circle at center, #000010, #000000);
-      color: gold;
-      font-family: 'Arial Black', sans-serif;
-      text-align: center;
-    }
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HyperFoco - Comandos MikroTik</title>
+<style>
+  /* Fundo preto e estilo neon azul */
+  body {
+    background-color: #000;
+    color: #eee;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: 0;
+    padding: 20px;
+  }
 
-    h1 {
-      font-size: 3em;
-      margin-top: 1em;
-      color: gold;
-      text-shadow: 0 0 10px #FFD700, 0 0 20px #FFA500;
-    }
+  h1, h2 {
+    color: #00ffff;
+    text-shadow:
+      0 0 5px #00ffff,
+      0 0 10px #00ffff,
+      0 0 20px #00ffff,
+      0 0 40px #00ffff;
+  }
 
-    .value {
-      font-size: 2em;
-      margin: 0.2em;
-      color: #00ffff;
-      text-shadow: 0 0 10px #00ffff;
-    }
+  h1 {
+    font-size: 2.5em;
+    margin-bottom: 0.2em;
+  }
 
-    #countdown {
-      font-size: 1.5em;
-      margin-top: 0.5em;
-      color: #ff00ff;
-      text-shadow: 0 0 10px #ff00ff;
-    }
+  h2 {
+    margin-top: 2em;
+    margin-bottom: 0.6em;
+  }
 
-    button {
-      padding: 15px 30px;
-      font-size: 1.5em;
-      margin-top: 1.5em;
-      background-color: #00ffff;
-      color: #000;
-      border: none;
-      border-radius: 10px;
-      cursor: pointer;
-      box-shadow: 0 0 15px #00ffff;
-      transition: transform 0.2s ease;
-    }
+  pre {
+    background-color: #111;
+    padding: 15px;
+    border-radius: 8px;
+    color: #0ff;
+    font-size: 1em;
+    overflow-x: auto;
+    box-shadow:
+      0 0 5px #00ffff,
+      0 0 15px #00ffff;
+  }
 
-    button:hover {
-      transform: scale(1.1);
-    }
+  p {
+    line-height: 1.4em;
+  }
 
-    #code {
-      margin-top: 1em;
-      font-size: 2em;
-      color: #00ff00;
-      text-shadow: 0 0 10px #00ff00;
-    }
+  /* Container centralizado */
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+  }
 
-    .footer {
-      margin-top: 3em;
-      font-size: 1.2em;
-      color: #ccc;
-    }
-
-    a {
-      color: #FFD700;
-      text-decoration: none;
-      font-weight: bold;
-    }
-
-    a:hover {
-      text-decoration: underline;
-    }
-  </style>
+  /* Rodapé pequeno */
+  footer {
+    text-align: center;
+    margin-top: 40px;
+    font-size: 0.9em;
+    color: #555;
+  }
+</style>
 </head>
 <body>
-  <h1>Hiper-Sorte</h1>
-  <div class="value">🎁 Sorteio de R$200</div>
-  <div id="countdown"></div>
+  <div class="container">
+    <h1>HyperFoco - Comandos Básicos MikroTik</h1>
+    <p>Guia rápido e organizado para você dominar o MikroTik via terminal.</p>
 
-  <button onclick="gerarCodigo()">Gerar Código da Sorte</button>
-  <div id="code"></div>
+    <h2>1. Visualizar informações gerais</h2>
+    <pre>
+/ip address print             → Ver IPs configurados
+/ip route print               → Ver rotas configuradas
+/ip dns print                 → Ver configuração DNS
+/ip dhcp-client print         → Ver cliente DHCP
+/system identity print        → Ver nome do roteador
+    </pre>
 
-  <div class="footer">
-    Envie o código para <a href="https://wa.me/5555996043937?text=(sorte)-hiperfoco" target="_blank">WhatsApp para participar</a><br/>
-    A chave Pix será enviada após confirmação no WhatsApp.
+    <h2>2. Internet e IP Público</h2>
+    <pre>
+/ip cloud print               → Ver IP público e DNS name (MyNetName)
+/tool netwatch                → Monitorar conectividade
+    </pre>
+
+    <h2>3. Leases DHCP</h2>
+    <pre>
+/ip dhcp-server lease print   → Ver dispositivos conectados (DHCP leases)
+    </pre>
+
+    <h2>4. Firewall e NAT</h2>
+    <pre>
+/ip firewall filter print     → Ver regras de firewall
+/ip firewall nat print        → Ver regras NAT
+    </pre>
+
+    <h2>5. Acesso remoto e serviços</h2>
+    <pre>
+/ip service print             → Ver portas e serviços ativos (ex: SSH, Winbox)
+/ip service disable telnet    → Desativar Telnet
+/ip service enable ssh        → Ativar SSH
+    </pre>
+
+    <h2>6. Ver interfaces e status</h2>
+    <pre>
+/interface print              → Ver todas interfaces
+/interface wireless print     → Ver status do Wi-Fi
+    </pre>
+
+    <h2>7. Liberar SSH remoto temporariamente</h2>
+    <pre>
+/ip firewall filter add chain=input action=accept protocol=tcp dst-port=22 place-before=10 comment="Liberar SSH remoto temporariamente"
+    </pre>
+
+    <footer>
+      &copy; 2025 HyperFoco by Érico Mendieta
+    </footer>
   </div>
-
-  <script>
-    function gerarCodigo() {
-      const numero = Math.floor(Math.random() * 1000) + 1;
-      const codigo = `HS-${numero.toString().padStart(4, '0')}`;
-      document.getElementById("code").innerText = `Seu código: ${codigo}`;
-    }
-
-    function startCountdown() {
-      const targetTime = new Date().getTime() + 24 * 60 * 60 * 1000;
-      const countdown = document.getElementById("countdown");
-
-      function updateCountdown() {
-        const now = new Date().getTime();
-        const distance = targetTime - now;
-
-        if (distance <= 0) {
-          countdown.innerHTML = "⏰ Tempo esgotado!";
-          return;
-        }
-
-        const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-
-        countdown.innerHTML = `⏳ Fim em ${hours}h ${minutes}m ${seconds}s`;
-        setTimeout(updateCountdown, 1000);
-      }
-
-      updateCountdown();
-    }
-
-    startCountdown();
-  </script>
 </body>
 </html>
